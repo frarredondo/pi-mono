@@ -23,8 +23,22 @@ interface ToolConfig {
 	repo: string; // GitHub repo (e.g., "sharkdp/fd")
 	binaryName: string; // Name of the binary inside the archive
 	systemBinaryNames?: string[]; // Alternative system command names to try before downloading
-	tagPrefix: string; // Prefix for tags (e.g., "v" for v1.0.0, "" for 1.0.0)
 	getAssetName: (version: string, plat: string, architecture: string) => string | null;
+}
+
+interface GitHubReleaseAsset {
+	name: string;
+}
+
+interface GitHubRelease {
+	tag_name: string;
+	assets?: GitHubReleaseAsset[];
+}
+
+export interface CompatibleToolRelease {
+	tagName: string;
+	version: string;
+	assetName: string;
 }
 
 const TOOLS: Record<string, ToolConfig> = {
@@ -33,7 +47,6 @@ const TOOLS: Record<string, ToolConfig> = {
 		repo: "sharkdp/fd",
 		binaryName: "fd",
 		systemBinaryNames: ["fd", "fdfind"],
-		tagPrefix: "v",
 		getAssetName: (version, plat, architecture) => {
 			if (plat === "darwin") {
 				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
@@ -52,7 +65,6 @@ const TOOLS: Record<string, ToolConfig> = {
 		name: "ripgrep",
 		repo: "BurntSushi/ripgrep",
 		binaryName: "rg",
-		tagPrefix: "",
 		getAssetName: (version, plat, architecture) => {
 			if (plat === "darwin") {
 				const archStr = architecture === "arm64" ? "aarch64" : "x86_64";
@@ -104,9 +116,50 @@ export function getToolPath(tool: "fd" | "rg"): string | null {
 	return null;
 }
 
-// Fetch latest release version from GitHub
-async function getLatestVersion(repo: string): Promise<string> {
-	const response = await fetch(`https://api.github.com/repos/${repo}/releases/latest`, {
+export function resolveLatestCompatibleRelease(
+	tool: "fd" | "rg",
+	plat: string,
+	architecture: string,
+	releases: GitHubRelease[],
+): CompatibleToolRelease {
+	const config = TOOLS[tool];
+	if (!config) throw new Error(`Unknown tool: ${tool}`);
+	if (releases.length === 0) {
+		throw new Error(`No releases found for ${config.repo}`);
+	}
+
+	for (const release of releases) {
+		const version = release.tag_name.replace(/^v/, "");
+		const assetName = config.getAssetName(version, plat, architecture);
+		if (!assetName) {
+			throw new Error(`Unsupported platform: ${plat}/${architecture}`);
+		}
+		if (release.assets?.some((asset) => asset.name === assetName)) {
+			return { tagName: release.tag_name, version, assetName };
+		}
+	}
+
+	const latestTag = releases[0].tag_name;
+	const latestVersion = latestTag.replace(/^v/, "");
+	const expectedAssetName = config.getAssetName(latestVersion, plat, architecture);
+	if (!expectedAssetName) {
+		throw new Error(`Unsupported platform: ${plat}/${architecture}`);
+	}
+	throw new Error(
+		`No compatible release asset found for ${config.name} on ${plat}/${architecture} (expected ${expectedAssetName})`,
+	);
+}
+
+// Fetch the newest release that still ships a compatible asset for this platform.
+async function getLatestCompatibleRelease(
+	tool: "fd" | "rg",
+	plat: string,
+	architecture: string,
+): Promise<CompatibleToolRelease> {
+	const config = TOOLS[tool];
+	if (!config) throw new Error(`Unknown tool: ${tool}`);
+
+	const response = await fetch(`https://api.github.com/repos/${config.repo}/releases?per_page=20`, {
 		headers: { "User-Agent": `${APP_NAME}-coding-agent` },
 		signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
 	});
@@ -115,8 +168,8 @@ async function getLatestVersion(repo: string): Promise<string> {
 		throw new Error(`GitHub API error: ${response.status}`);
 	}
 
-	const data = (await response.json()) as { tag_name: string };
-	return data.tag_name.replace(/^v/, "");
+	const releases = (await response.json()) as GitHubRelease[];
+	return resolveLatestCompatibleRelease(tool, plat, architecture, releases);
 }
 
 // Download a file from URL
@@ -167,19 +220,12 @@ async function downloadTool(tool: "fd" | "rg"): Promise<string> {
 	const plat = platform();
 	const architecture = arch();
 
-	// Get latest version
-	const version = await getLatestVersion(config.repo);
-
-	// Get asset name for this platform
-	const assetName = config.getAssetName(version, plat, architecture);
-	if (!assetName) {
-		throw new Error(`Unsupported platform: ${plat}/${architecture}`);
-	}
+	const { tagName, assetName } = await getLatestCompatibleRelease(tool, plat, architecture);
 
 	// Create tools directory
 	mkdirSync(TOOLS_DIR, { recursive: true });
 
-	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
+	const downloadUrl = `https://github.com/${config.repo}/releases/download/${tagName}/${assetName}`;
 	const archivePath = join(TOOLS_DIR, assetName);
 	const binaryExt = plat === "win32" ? ".exe" : "";
 	const binaryPath = join(TOOLS_DIR, config.binaryName + binaryExt);

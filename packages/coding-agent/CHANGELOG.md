@@ -16,6 +16,7 @@
 
 ### Fixed
 
+- Fixed `fd` auto-download to fall back to the newest compatible GitHub release asset instead of hard-failing when the latest upstream release no longer ships binaries for the current platform.
 - Fixed OpenAI Codex WebSocket transport keeping `--print` and JSON mode processes alive after the response by closing cached WebSocket sessions during session shutdown ([#4103](https://github.com/badlogic/pi-mono/issues/4103)).
 
 ## [0.72.1] - 2026-05-02
